@@ -1,0 +1,285 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Dashboard</h1>
+  <span class="sub">{{ account.currency }} account · {{ status.ib.account or '—' }} · all times HKT</span>
+  <div class="spacer" style="flex:1"></div>
+  <button class="btn primary" id="run-now">Run pipeline now</button>
+</div>
+
+{% if pending_approvals %}
+<div class="card mb" style="border-color:var(--warn)">
+  <div class="card-body" style="display:flex;gap:12px;align-items:center">
+    <span class="badge warn nowrap">{{ pending_approvals|length }} to approve</span>
+    <div style="flex:1">
+      <strong>Orders are waiting for your approval.</strong>
+      <span class="dim">
+        {% for p in pending_approvals[:4] %}{{ p.side }} {{ p.qty }} {{ p.ticker }}{{ ', ' if not loop.last }}{% endfor %}
+        {% if not clock.is_open %}— approving queues them for the {{ clock.next_open | hkt }} open.{% endif %}
+      </span>
+    </div>
+    <a class="btn primary sm" href="/orders">Review →</a>
+  </div>
+</div>
+{% endif %}
+
+{% if status.ib.competing_session %}
+<div class="card mb" style="border-color:var(--warn)">
+  <div class="card-body" style="display:flex;gap:12px;align-items:flex-start">
+    <span class="badge warn nowrap">Market data blocked</span>
+    <div>
+      <strong>IB Gateway reports a competing live session (error 10197).</strong>
+      <div class="dim" style="margin-top:3px">
+        Quotes and historical bars from IBKR are unavailable, so the bot is using yfinance
+        (15-min delayed) for bars and prices. Orders still route to IBKR normally.
+        To restore IBKR data: log out of TWS / the mobile app or any other Gateway session
+        using this account, then restart IB Gateway.
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{% if status.model.ready and not status.model.edge_verified %}
+<div class="card mb" style="border-color:var(--warn)">
+  <div class="card-body" style="display:flex;gap:12px;align-items:flex-start">
+    <span class="badge warn nowrap">Unverified edge</span>
+    <div>
+      <strong>The champion model does not yet show a positive out-of-sample edge.</strong>
+      <div class="dim" style="margin-top:3px">
+        Top-decile OOF expectancy
+        <strong>{{ '%+.2f'|format(status.model.thresholds.get('top_decile_mean_r', 0)) }}R</strong>
+        over {{ status.model.thresholds.get('top_decile_trades', 0) }} trades.
+        The edge gate is in <strong>{{ cfg.strategy.edge_gate_mode }}</strong> mode, so paper entries are
+        allowed for forward testing and tagged <span class="pill">WARN_NEG_EDGE</span>.
+        LIVE trading stays blocked until a model with positive OOF expectancy is promoted.
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<div class="grid cols-6 mb">
+  <div class="card kpi">
+    <div class="label">Net liquidation</div>
+    <div class="value">{{ account.net_liq | money(account.currency) }}</div>
+    <div class="sub">${{ '%.0f'|format(account.net_liq_usd) }} USD · fx {{ '%.4f'|format(account.fx_to_usd) }}</div>
+  </div>
+  <div class="card kpi">
+    <div class="label">Available cash</div>
+    <div class="value">{{ account.available_funds | money(account.currency) }}</div>
+    <div class="sub">total {{ account.cash | money(account.currency) }}</div>
+  </div>
+  <div class="card kpi">
+    <div class="label">Buying power</div>
+    <div class="value">{{ account.buying_power | money(account.currency) }}</div>
+    <div class="sub">excess liq {{ '%.1f'|format(account.excess_liq_pct) }}%</div>
+  </div>
+  <div class="card kpi">
+    <div class="label">Day P&amp;L</div>
+    <div class="value {{ account.daily_pnl | cls }}">{{ account.daily_pnl | money(account.currency) }}</div>
+    <div class="sub {{ account.daily_pnl_pct | cls }}">{{ account.daily_pnl_pct | pct }}</div>
+  </div>
+  <div class="card kpi">
+    <div class="label">Realized</div>
+    <div class="value {{ account.realized_pnl | cls }}">{{ account.realized_pnl | money(account.currency) }}</div>
+    <div class="sub">today</div>
+  </div>
+  <div class="card kpi">
+    <div class="label">Unrealized</div>
+    <div class="value {{ account.unrealized_pnl | cls }}">{{ account.unrealized_pnl | money(account.currency) }}</div>
+    <div class="sub">{{ positions|length }}/{{ status.max_positions }} slots used</div>
+  </div>
+</div>
+
+<div class="split mb">
+  <div class="card">
+    <div class="card-head">
+      <h2>Equity curve</h2>
+      <div class="spacer" style="flex:1"></div>
+      <div class="btn-group" id="curve-range">
+        <button class="chip active" data-range="1d">1D</button>
+        <button class="chip" data-range="1w">1W</button>
+        <button class="chip" data-range="all">ALL</button>
+      </div>
+    </div>
+    <div class="card-body"><div style="height:236px"><canvas id="equity-chart"></canvas></div></div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2>Open positions</h2>
+      <div class="spacer" style="flex:1"></div>
+      <a href="/positions" class="btn sm ghost">Manage →</a></div>
+    <div class="card-body tight">
+      {% if positions %}
+      <table class="tbl-compact">
+        <thead><tr><th>Symbol</th><th class="num">Qty</th><th class="num">Last</th><th class="num">Unreal</th><th class="num">SL / TP</th></tr></thead>
+        <tbody>
+        {% for p in positions %}
+          <tr>
+            <td class="ticker">{{ p.ticker }}</td>
+            <td class="num">{{ p.qty|int }}</td>
+            <td class="num">{{ p.last | num }}</td>
+            <td class="num {{ p.unrealized_pnl | cls }}">{{ p.unrealized_pnl | num(0) }} <span class="faint">({{ p.unrealized_pct | pct(1) }})</span></td>
+            <td class="num faint">{{ p.sl | num }} / {{ p.tp | num }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <div class="empty">No open positions</div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<div class="split">
+  <div class="card">
+    <div class="card-head"><h2>Last run</h2>
+      <div class="spacer" style="flex:1"></div>
+      {% if last_run %}<a href="/pipeline?run_id={{ last_run.id }}" class="btn sm ghost">Details →</a>{% endif %}
+    </div>
+    <div class="card-body">
+      {% if last_run %}
+      <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
+        <span class="badge {{ 'good' if last_run.status=='ok' else ('warn' if last_run.status=='partial' else 'bad') }}">{{ last_run.status }}</span>
+        <span class="dim">Run #{{ last_run.id }} · {{ last_run.started_at | hkt }} HKT · {{ (last_run.duration_ms/1000)|round(1) }}s</span>
+        <span class="pill">{{ last_run.trigger }}</span>
+      </div>
+      {% set f = last_run.funnel or {} %}
+      <div class="grid cols-4" style="gap:8px">
+        <div><div class="faint" style="font-size:11px">UNIVERSE</div><div style="font-size:17px;font-weight:650">{{ f.get('universe', 0) }}</div></div>
+        <div><div class="faint" style="font-size:11px">WITH NEWS</div><div style="font-size:17px;font-weight:650">{{ f.get('with_news', 0) }}</div></div>
+        <div><div class="faint" style="font-size:11px">PASSED GATES</div><div style="font-size:17px;font-weight:650">{{ f.get('passed_gates', 0) }}</div></div>
+        <div><div class="faint" style="font-size:11px">SELECTED</div><div style="font-size:17px;font-weight:650">{{ f.get('selected', 0) }}</div></div>
+      </div>
+      {% if last_run.stage_timings %}
+      <div class="timeline mt">
+        {% for st in last_run.stage_timings %}
+          {% set w = [6, (st.ms / 200)|round(0,'ceil')|int]|max %}
+          <div class="seg {{ st.status }}" style="width:{{ w }}px" title="{{ st.name }} · {{ st.status }} · {{ (st.ms/1000)|round(2) }}s">{{ st.name.split('_')[0] }}</div>
+        {% endfor %}
+      </div>
+      {% endif %}
+      {% if last_run.error %}<div class="mt neg" style="font-size:12px">{{ last_run.error }}</div>{% endif %}
+      {% else %}
+      <div class="empty">No runs yet — press “Run pipeline now”.</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2>Alerts</h2></div>
+    <div class="card-body tight">
+      {% if alerts %}
+      <table class="tbl-compact">
+        <tbody>
+        {% for a in alerts %}
+          <tr>
+            <td style="width:1%"><span class="badge {{ 'bad' if a.level in ('error','critical') else ('warn' if a.level=='warning' else 'neutral') }}">{{ a.level[:4] }}</span></td>
+            <td>{{ a.message }}</td>
+            <td class="num faint nowrap">{{ a.ts | hkt }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% else %}<div class="empty">No alerts</div>{% endif %}
+    </div>
+  </div>
+</div>
+
+{% if trades %}
+<div class="card mt">
+  <div class="card-head"><h2>Recent trades</h2><div class="spacer" style="flex:1"></div>
+    <a href="/orders" class="btn sm ghost">Journal →</a></div>
+  <div class="card-body tight">
+    <table>
+      <thead><tr><th>Symbol</th><th class="num">Qty</th><th class="num">Entry</th><th class="num">Exit</th><th class="num">P&amp;L</th><th class="num">R</th><th>Reason</th><th class="num">Closed</th></tr></thead>
+      <tbody>
+      {% for t in trades %}
+        <tr>
+          <td class="ticker">{{ t.ticker }}</td>
+          <td class="num">{{ t.qty|int }}</td>
+          <td class="num">{{ t.entry_price | num }}</td>
+          <td class="num">{{ t.exit_price | num }}</td>
+          <td class="num {{ t.pnl | cls }}">{{ t.pnl | num(2) }}</td>
+          <td class="num {{ t.r_multiple | cls }}">{{ t.r_multiple | num(2) }}</td>
+          <td><span class="pill">{{ t.exit_reason | reason }}</span></td>
+          <td class="num faint">{{ t.exit_ts | hkt }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/vendor/chart.umd.min.js"></script>
+<script>
+(function () {
+  const { api, toast, fmt } = UI;
+  let chart = null;
+
+  async function loadCurve(range) {
+    const data = await api("/api/account/history?range=" + range);
+    const pts = data.points || [];
+    const labels = pts.map(p => fmt.time(p.ts));
+    const values = pts.map(p => p.net_liq);
+    const ctx = document.getElementById("equity-chart");
+    if (!ctx) return;
+    const up = values.length ? values[values.length - 1] >= values[0] : true;
+    const color = up ? "#d1242f" : "#128a4b";
+    if (chart) chart.destroy();
+    chart = new Chart(ctx, {
+      type: "line",
+      data: { labels, datasets: [{
+        data: values, borderColor: color, borderWidth: 1.8,
+        pointRadius: 0, tension: .25, fill: true,
+        backgroundColor: (c) => {
+          const g = c.chart.ctx.createLinearGradient(0, 0, 0, 240);
+          g.addColorStop(0, up ? "rgba(209,36,47,.16)" : "rgba(18,138,75,.16)");
+          g.addColorStop(1, "rgba(0,0,0,0)");
+          return g;
+        }
+      }] },
+      options: {
+        responsive: true, maintainAspectRatio: false, animation: false,
+        plugins: { legend: { display: false },
+          tooltip: { callbacks: { label: (i) => " " + fmt.money(i.parsed.y) } } },
+        scales: {
+          x: { ticks: { maxTicksLimit: 6, color: "#8b97a4", font: { size: 10 } }, grid: { display: false } },
+          y: { ticks: { maxTicksLimit: 5, color: "#8b97a4", font: { size: 10 },
+                 callback: (v) => v >= 1000 ? (v/1000).toFixed(0) + "k" : v },
+               grid: { color: "rgba(128,140,155,.12)" } }
+        }
+      }
+    });
+  }
+
+  document.querySelectorAll("#curve-range .chip").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll("#curve-range .chip").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      loadCurve(btn.dataset.range);
+    });
+  });
+
+  document.getElementById("run-now").addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    try {
+      await api("/api/pipeline/run", { method: "POST", body: {} });
+      toast("Pipeline run started");
+    } catch (err) { toast(err.message, "error"); }
+    setTimeout(() => { e.target.disabled = false; }, 4000);
+  });
+
+  loadCurve("1d");
+  document.addEventListener("sse", (e) => {
+    if (e.detail.topic === "run.done") setTimeout(() => location.reload(), 800);
+  });
+})();
+</script>
+{% endblock %}

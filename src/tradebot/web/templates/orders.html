@@ -1,0 +1,311 @@
+{% extends "base.html" %}
+{% block title %}Orders & Trades{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Orders &amp; Trades</h1>
+  <span class="sub">Approvals, live IBKR orders and the trade journal</span>
+  <div style="flex:1"></div>
+  <a class="btn sm" href="/api/trades/export.csv">Export trades CSV</a>
+</div>
+
+{% if not clock.is_open %}
+<div class="card mb" style="border-color:var(--accent)">
+  <div class="card-body" style="display:flex;gap:12px;align-items:flex-start">
+    <span class="badge neutral nowrap">Market closed</span>
+    <div>
+      <strong>Opens in <span id="open-in" data-next-open="{{ clock.next_open.isoformat() }}">—</span>
+        ({{ clock.next_open | hkt }} HKT).</strong>
+      <div class="dim" style="margin-top:3px">
+        {% if queue_outside %}
+        Approved orders are <strong>queued at IBKR</strong> now and execute as soon as the market opens.
+        Each one carries its stop and target as a bracket, so the position is protected server-side
+        even if this app is not running.
+        {% else %}
+        Entries are blocked outside market hours. Enable
+        <code>pipeline.queue_entries_outside_rth</code> in Settings to queue approved orders for the open.
+        {% endif %}
+        Market orders are converted to limits (±{{ cfg.execution.slippage_buffer_bps }} bps) because
+        IBKR does not accept market orders outside regular hours.
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{% if pending %}
+<div class="card mb" style="border-color:var(--warn)">
+  <div class="card-head">
+    <h2>Awaiting your approval</h2>
+    <div style="flex:1"></div>
+    <span class="badge warn">{{ pending|length }} order{{ '' if pending|length == 1 else 's' }}</span>
+  </div>
+  <div class="card-body tight">
+    <table>
+      <thead><tr>
+        <th>Symbol</th><th>Side</th><th class="num">Qty</th><th class="num">Limit</th>
+        <th class="num">Stop</th><th class="num">Target</th><th class="num">R:R</th>
+        <th>Why</th><th class="right">Decision</th>
+      </tr></thead>
+      <tbody>
+      {% for i in pending %}
+        {% set meta = i.meta or {} %}
+        {% set sizing = meta.get('sizing') or {} %}
+        <tr data-intent="{{ i.id }}">
+          <td class="ticker">{{ i.ticker }}</td>
+          <td><span class="badge {{ 'bad' if i.side == 'BUY' else 'good' }}">{{ i.side }}</span></td>
+          <td class="num">{{ i.qty }}</td>
+          <td class="num">{{ i.limit_price | num if i.limit_price else '—' }}</td>
+          <td class="num">{{ i.planned_sl | num if i.planned_sl else '—' }}</td>
+          <td class="num">{{ i.planned_tp | num if i.planned_tp else '—' }}</td>
+          <td class="num">{{ sizing.get('tp_sl_ratio', '—') }}</td>
+          <td class="dim" style="font-size:11.5px">
+            <span class="pill">{{ i.reason | reason }}</span>
+            {% if meta.get('queued') %}<span class="pill">queued for open</span>{% endif %}
+            {% if sizing.get('sizing_mode') == 'exploratory' %}
+            <span class="pill" title="Negative Kelly: sized from a reduced risk budget so the unproven model can be forward-tested. LIVE trading vetoes these.">exploratory</span>
+            {% endif %}
+            {% if sizing.get('risk_pct') %}risk {{ '%.2f'|format(sizing.get('risk_pct')) }}%{% endif %}
+          </td>
+          <td class="right nowrap">
+            <div class="btn-group" style="justify-content:flex-end">
+              <button class="btn sm primary approve" data-id="{{ i.id }}" data-ticker="{{ i.ticker }}">
+                Approve
+              </button>
+              <button class="btn sm reject" data-id="{{ i.id }}" data-ticker="{{ i.ticker }}">Reject</button>
+            </div>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="card-body" style="border-top:1px solid var(--border);font-size:11.5px" class="dim">
+    <span class="dim">
+      Approving sends the order to IBKR immediately{% if not clock.is_open %} and it waits for the open{% endif %}.
+      A marketable limit is <strong>re-priced to the live quote</strong> at approval, so a small move
+      does not stop it filling. Rejecting discards it — nothing is sent.
+      Approvals expire after <strong>{{ cfg.approval_ttl_minutes }} min</strong> or as soon as a newer
+      run produces a fresh decision. Approval mode is
+      <strong>{{ approval_mode.replace('_',' ') }}</strong> (change it in Settings).
+    </span>
+  </div>
+</div>
+{% endif %}
+
+<div class="card mb">
+  <div class="card-head"><h2>Working orders at IBKR</h2><div style="flex:1"></div>
+    {% if queued_notional %}
+    {% set used = (queued_notional / cash_usd * 100) if cash_usd else 0 %}
+    <span class="pill" title="Notional of working BUY orders vs account cash">
+      queued ${{ '{:,.0f}'.format(queued_notional) }}
+      of ${{ '{:,.0f}'.format(cash_usd) }} cash ({{ '%.0f'|format(used) }}%)
+    </span>
+    {% if used > 90 %}<span class="badge bad nowrap">near cash limit</span>{% endif %}
+    {% endif %}
+    <span class="badge {{ 'good' if ib_orders else 'off' }}">{{ ib_orders|length }} open</span></div>
+  <div class="card-body tight">
+    {% if ib_orders %}
+    <table>
+      <thead><tr><th>Symbol</th><th>Action</th><th class="num">Qty</th><th>Type</th><th class="num">Limit</th>
+        <th class="num">Stop</th><th>Status</th><th>TIF</th><th>Role</th><th>Ref</th><th></th></tr></thead>
+      <tbody>
+      {% for t in ib_orders %}
+        <tr>
+          <td class="ticker">{{ t.contract.symbol }}</td>
+          <td><span class="badge {{ 'bad' if t.order.action == 'BUY' else 'good' }}">{{ t.order.action }}</span></td>
+          <td class="num">{{ t.order.totalQuantity|int }}</td>
+          <td class="dim">{{ t.order.orderType }}</td>
+          <td class="num">{{ t.order.lmtPrice | num if t.order.lmtPrice and t.order.lmtPrice < 1e30 else '—' }}</td>
+          <td class="num">{{ t.order.auxPrice | num if t.order.auxPrice and t.order.auxPrice < 1e30 else '—' }}</td>
+          <td class="dim">
+            {{ t.orderStatus.status }}
+            {% if t.orderStatus.status in ('PreSubmitted','Submitted') and not clock.is_open
+                  and not t.order.orderRef.endswith(':sl') and not t.order.orderRef.endswith(':tp') %}
+            <span class="pill" title="waits for the market open">queued</span>
+            {% endif %}
+          </td>
+          <td class="dim">{{ t.order.tif }}</td>
+          {% set ref = t.order.orderRef or '' %}
+          <td class="faint">
+            {% if ref.endswith(':sl') %}<span class="pill">stop</span>
+            {% elif ref.endswith(':tp') %}<span class="pill">target</span>
+            {% else %}<span class="pill">entry</span>{% endif %}
+          </td>
+          <td class="faint" style="font-size:11px">{{ ref }}</td>
+          <td class="faint" style="font-size:10.5px">
+            {% if t.order.parentId %}child of {{ t.order.parentId }}{% endif %}
+          </td>
+          <td class="num">
+            {% set is_prot = (t.order.orderRef or '').endswith(':sl') or (t.order.orderRef or '').endswith(':tp') %}
+            <button class="btn sm danger cancel-order" data-id="{{ t.order.orderId }}"
+                    data-protective="{{ '1' if is_prot else '0' }}"
+                    data-ticker="{{ t.contract.symbol }}">Cancel</button>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="empty">No working orders</div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card mb">
+  <div class="card-head"><h2>Order intents</h2><div style="flex:1"></div>
+    <span class="faint" style="font-size:11px">every decision the bot tried to execute (incl. DRY_RUN)</span></div>
+  <div class="card-body tight">
+    <div class="tbl-scroll" style="max-height:320px">
+    <table class="tbl-compact">
+      <thead><tr><th class="num">#</th><th>Time</th><th>Symbol</th><th>Side</th><th class="num">Qty</th>
+        <th>Reason</th><th>Status</th><th>Source</th><th>Ref</th><th></th></tr></thead>
+      <tbody>
+      {% for i in intents %}
+        <tr>
+          <td class="num faint">{{ i.id }}</td>
+          <td class="faint nowrap">{{ i.created_at | hkt }}</td>
+          <td class="ticker">{{ i.ticker }}</td>
+          <td><span class="badge {{ 'bad' if i.side == 'BUY' else 'good' }}">{{ i.side }}</span></td>
+          <td class="num">{{ i.qty }}</td>
+          <td class="dim">{{ i.reason | reason }}</td>
+          <td>
+            {% set st = i.status %}
+            <span class="badge {{ 'good' if st in ('filled','approved') else ('warn' if st in ('awaiting_approval','submitted','queued','dry_run') else ('bad' if st=='rejected' else 'off')) }}">{{ st }}</span>
+          </td>
+          <td class="dim">{{ i.source }}</td>
+          <td class="faint" style="font-size:10.5px">{{ i.order_ref }}</td>
+          <td class="num nowrap">
+            {% if i.status == 'awaiting_approval' %}
+            <button class="btn sm primary approve" data-id="{{ i.id }}">Approve</button>
+            <button class="btn sm reject" data-id="{{ i.id }}">Reject</button>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% if not intents %}<div class="empty">No intents yet</div>{% endif %}
+  </div>
+</div>
+
+<div class="card mb">
+  <div class="card-head"><h2>Trade journal</h2><div style="flex:1"></div>
+    <input id="trade-filter" placeholder="Filter ticker…" style="width:140px"></div>
+  <div class="card-body tight">
+    <div class="tbl-scroll" style="max-height:400px">
+    <table id="trade-table">
+      <thead><tr><th>Symbol</th><th class="num">Qty</th><th class="num">Entry</th><th>Entry time</th>
+        <th class="num">Exit</th><th>Exit time</th><th class="num">P&amp;L</th><th class="num">%</th>
+        <th class="num">R</th><th>Exit reason</th><th class="num">Bars</th></tr></thead>
+      <tbody>
+      {% for t in trades %}
+        <tr data-ticker="{{ t.ticker }}">
+          <td class="ticker">{{ t.ticker }}</td>
+          <td class="num">{{ t.qty|int }}</td>
+          <td class="num">{{ t.entry_price | num }}</td>
+          <td class="faint nowrap">{{ t.entry_ts | hkt }}</td>
+          <td class="num">{{ t.exit_price | num }}</td>
+          <td class="faint nowrap">{{ t.exit_ts | hkt }}</td>
+          <td class="num {{ t.pnl | cls }}">{{ t.pnl | num(2) }}</td>
+          <td class="num {{ t.pnl_pct | cls }}">{{ t.pnl_pct | pct(2) }}</td>
+          <td class="num {{ t.r_multiple | cls }}">{{ t.r_multiple | num(2) }}</td>
+          <td><span class="pill">{{ t.exit_reason | reason }}</span></td>
+          <td class="num faint">{{ t.hold_bars }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% if not trades %}<div class="empty">No closed trades yet</div>{% endif %}
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>Executions</h2></div>
+  <div class="card-body tight">
+    <div class="tbl-scroll" style="max-height:260px">
+    <table class="tbl-compact">
+      <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th class="num">Qty</th><th class="num">Price</th><th class="num">Commission</th><th>Exec ID</th></tr></thead>
+      <tbody>
+      {% for f in fills %}
+        <tr>
+          <td class="faint nowrap">{{ f.ts | hkt }}</td>
+          <td class="ticker">{{ f.ticker }}</td>
+          <td><span class="badge {{ 'bad' if f.side == 'BOUGHT' or f.side == 'BUY' else 'good' }}">{{ f.side }}</span></td>
+          <td class="num">{{ f.qty|int }}</td>
+          <td class="num">{{ f.price | num }}</td>
+          <td class="num">{{ f.commission | num(2) }}</td>
+          <td class="faint" style="font-size:10.5px">{{ f.exec_id[:18] }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% if not fills %}<div class="empty">No executions recorded</div>{% endif %}
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  const { api, toast, confirmDialog, countdown } = UI;
+
+  // countdown to the next open
+  const el = document.getElementById("open-in");
+  if (el && el.dataset.nextOpen) countdown(el.dataset.nextOpen, el);
+
+  async function act(id, action, ticker) {
+    const label = action === "approve" ? "Approve" : "Reject";
+    if (action === "reject") {
+      const ok = await confirmDialog("Reject order", `Discard the ${ticker} order? Nothing is sent to IBKR.`, true);
+      if (!ok) return;
+    }
+    const btns = document.querySelectorAll(`[data-id="${id}"]`);
+    btns.forEach(b => b.disabled = true);
+    try {
+      const r = await api(`/api/approvals/${id}/${action}`, { method: "POST", body: {} });
+      if (action === "approve") {
+        const q = r.queued ? " — queued, will execute at the open" : "";
+        toast(`${ticker} approved${q}`, "ok");
+      } else {
+        toast(`${ticker} rejected`, "ok");
+      }
+      setTimeout(() => location.reload(), 900);
+    } catch (e) {
+      toast(e.message, "error");
+      btns.forEach(b => b.disabled = false);
+    }
+  }
+
+  document.querySelectorAll(".approve").forEach(b =>
+    b.addEventListener("click", () => act(b.dataset.id, "approve", b.dataset.ticker || "")));
+  document.querySelectorAll(".reject").forEach(b =>
+    b.addEventListener("click", () => act(b.dataset.id, "reject", b.dataset.ticker || "")));
+
+  document.querySelectorAll(".cancel-order").forEach(b => b.addEventListener("click", async () => {
+    // cancelling a stop or target leaves the position unprotected
+    if (b.dataset.protective === "1") {
+      const ok = await confirmDialog(
+        "Cancel protection?",
+        `${b.dataset.ticker} will be left WITHOUT a stop or target. ` +
+        "Use \u201cClose\u201d on the Positions page to exit instead.",
+        true);
+      if (!ok) return;
+    }
+    try { await api(`/api/orders/${b.dataset.id}/cancel`, { method: "POST", body: {} });
+      toast("Cancel sent", "ok"); setTimeout(() => location.reload(), 900); }
+    catch (e) { toast(e.message, "error"); }
+  }));
+
+  const f = document.getElementById("trade-filter");
+  f?.addEventListener("input", () => {
+    const q = f.value.toUpperCase();
+    document.querySelectorAll("#trade-table tbody tr").forEach(tr => {
+      tr.style.display = !q || tr.dataset.ticker.includes(q) ? "" : "none";
+    });
+  });
+})();
+</script>
+{% endblock %}

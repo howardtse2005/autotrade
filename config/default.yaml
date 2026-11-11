@@ -1,0 +1,161 @@
+# Default configuration. UI edits are stored as DB overrides on top of this file.
+mode: dry_run                     # off | dry_run | paper | live   (.env TRADING_MODE wins unless UI overrides)
+approval_mode: auto               # auto | manual_approve
+base_currency: HKD
+
+pipeline:
+  interval_minutes: 15
+  market_hours_only: true
+  skip_open_minutes: 10
+  no_new_entries_last_minutes: 60
+  flatten_eod: true
+  run_timeout_seconds: 600
+  position_monitor_seconds: 60
+  research_when_closed: true
+  queue_entries_outside_rth: false   # true = entries outside RTH are queued at IBKR and fill at the open
+
+universe:
+  size: 50                    # names evaluated in the first tranche
+  names_per_slot: 20          # evaluate ~20 names per open slot in the first pass
+  max_candidates: 200         # total names the run may evaluate while filling slots
+  expand_step: 50             # names added per expansion round
+  max_expand_rounds: 2        # hard cap on expansion rounds per run
+  candidate_pool: 250
+  exchanges: [NASDAQ, NYSE]
+  min_price: 5
+  max_price: 1000
+  min_market_cap: 2.0e9
+  min_avg_dollar_volume: 25.0e6
+  min_relative_volume: 1.0
+  always_include_positions: true
+  benchmarks: [SPY, QQQ]
+  weights: {rel_volume: 0.35, abs_change: 0.25, dollar_volume: 0.25, atr_pct: 0.15}
+  static_watchlist: []
+
+data:
+  bar_minutes: 15
+  data_delay_minutes: 15
+  bar_provider_order: [yfinance, ibkr]   # IB historical is paced 1-by-1; yfinance is bulk + fast
+  intraday_history_days: 55
+  daily_lookback_days: 300
+  l2_enabled: false
+  quote_provider_order: [ibkr, yfinance]
+  bars_refresh_minutes: 15
+
+news:
+  lookback_hours: 48
+  max_items_per_ticker: 30
+  connectors:
+    google_news_rss: {enabled: true, weight: 0.8, rpm: 30}
+    yahoo_finance:   {enabled: true, weight: 0.8, rpm: 30}
+    finnhub:         {enabled: auto, weight: 1.0, rpm: 50}
+    marketaux:       {enabled: auto, weight: 0.8, rpm: 5}
+    generic_rss:     {enabled: true, weight: 0.7, rpm: 20}
+  generic_feeds:
+    cnbc: "https://www.cnbc.com/id/100003114/device/rss/rss.html"
+    marketwatch: "https://feeds.content.dowjones.io/public/rss/mw_topstories"
+    seekingalpha: "https://seekingalpha.com/market_currents.xml"
+  blocked_domains: []
+  dedupe_similarity: 90
+
+sentiment:
+  model: ProsusAI/finbert
+  max_tokens: 128
+  batch_size: 16
+  threads: 0                      # 0 = auto (physical cores - 1)
+  quantize_int8: false
+  half_life_minutes: 120
+  windows_minutes: [60, 240, 1440, 4320]
+  score_budget_seconds: 90
+  assumed_backfill_lag_minutes: 5
+  enabled: true
+
+ml:
+  horizon_bars: 8
+  label_tp_atr: 1.5
+  label_sl_atr: 1.0
+  min_train_rows: 8000
+  max_train_rows: 15000
+  train_window_days: 45
+  cv_splits: 3
+  purge_bars: 8
+  embargo_bars: 4
+  feature_groups: {ta: true, cross_section: true, sentiment: true, microstructure: false, regime: true}
+  svm_top_k_features: 24
+  svm_max_train_rows: 5000
+  retrain_weekday: 6
+  promote_if_oos_ic_ge: 0.0
+  max_auc_drop: 0.01
+
+strategy:
+  max_positions: 5
+  auto_thresholds: true             # derive the operating point from the champion's OOF data
+  min_cross_section_names: 10       # below this the p_win percentile is meaningless
+  quality_floor_pct: 0.60           # never fill slots from below the top 40% of p(win)
+  edge_gate_mode: warn              # strict = block negative-E[R] trades | warn = allow + flag | off
+                                    # LIVE always behaves as "strict"
+  buy_threshold_p_win: 0.58         # used only when auto_thresholds is false
+  exit_threshold_p_win: 0.45
+  rank_weights: {p_win: 0.50, exp_r_per_vol: 0.20, sentiment: 0.20, rel_volume: 0.10}
+  max_per_sector: 2
+  max_spread_bps: 25
+  sentiment_gate_enabled: true
+  min_ewm_240m: -0.10
+  block_if_neg_shock: true
+  neg_shock_threshold: -0.6
+  earnings_blackout_days: 1
+  rotation_enabled: true
+  min_score_gap_z: 0.5
+  min_hold_bars: 4
+  max_model_disagreement: 0.25
+  entry_timing_gate: true
+  min_p_entry: 0.45
+
+risk:
+  risk_per_trade_pct: 0.75
+  max_position_pct: 20
+  cash_buffer_pct: 5
+  sl_atr: 1.0
+  tp_atr: 1.5
+  min_sl_pct: 0.6
+  max_sl_pct: 3.0
+  trail_trigger_r: 1.0
+  trail_atr_mult: 1.0
+  time_stop_bars: 8
+  sentiment_size_mult: [0.7, 1.3]
+  sl_tighten_max: 0.25
+  tp_widen_max: 0.25
+  min_tp_sl_ratio: 1.2
+  kelly_fraction_cap: 0.25
+  daily_loss_limit_pct: 2.0
+  max_drawdown_halt_pct: 8.0
+  max_trades_per_day: 30          # 5 entries + 5 exits + rotation room
+  cooldown_after_stop_minutes: 120
+  intraday_margin_guard: true
+  min_excess_liquidity_pct: 15
+  min_notional: 500
+  participation_cap_pct: 0.5
+  max_order_notional: 25000
+
+execution:
+  entry_order_type: MKT
+  protective_orders: oca_stop_tp
+  slippage_buffer_bps: 25
+  queued_reprice_band_pct: 0.5    # re-price a queued entry when the decision moves this far
+  approval_max_drift_pct: 1.5      # reject an approval whose limit moved this far
+  queued_limit_buffer_bps: 50      # queued entries use a wider buffer so they actually fill at the open
+  outside_rth: false
+  fill_timeout_seconds: 30
+  protect_retry_attempts: 2
+
+costs:
+  commission_per_share: 0.005
+  commission_min: 1.00
+  commission_max_pct: 1.0
+  slippage_bps: 5
+  half_spread_from_data: true
+
+backtest:
+  initial_cash: 100000
+  intrabar_conflict: stop_first
+  days: 20

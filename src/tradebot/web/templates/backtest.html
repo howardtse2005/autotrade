@@ -1,0 +1,204 @@
+{% extends "base.html" %}
+{% block title %}Backtest{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Backtest</h1>
+  <span class="sub">Portfolio simulation using the same decision function as live trading</span>
+</div>
+
+<div class="split mb">
+  <div class="card">
+    <div class="card-head"><h2>Configuration</h2></div>
+    <div class="card-body">
+      <div class="grid cols-3" style="gap:12px">
+        <label class="field">Window (days)
+          <input type="number" id="bt-days" value="{{ cfg.backtest.days }}" min="1" max="120">
+        </label>
+        <label class="field">Initial cash (USD)
+          <input type="number" id="bt-cash" value="{{ cfg.backtest.initial_cash }}" step="1000">
+        </label>
+        <label class="field">Signals
+          <select id="bt-model">
+            <option value="1">Champion model</option>
+            <option value="0">Rule-based bootstrap</option>
+          </select>
+        </label>
+      </div>
+      <div class="dim mt" style="font-size:12px">
+        Uses {{ cfg.strategy.max_positions }} slots · {{ cfg.risk.risk_per_trade_pct }}% risk/trade ·
+        {{ cfg.ml.horizon_bars }}-bar horizon · costs {{ cfg.costs.slippage_bps }}bps slippage +
+        ${{ cfg.costs.commission_per_share }}/share. Fills occur at the open of bar k+1+lag
+        (lag = {{ cfg.data.execution_lag_bars }}) to model delayed data.
+      </div>
+      <div class="mt"><button class="btn primary" id="bt-run">Run backtest</button>
+        <span class="dim" id="bt-status" style="margin-left:10px"></span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2>History</h2></div>
+    <div class="card-body tight">
+      <div class="tbl-scroll" style="max-height:220px">
+      <table class="tbl-compact">
+        <thead><tr><th class="num">#</th><th>When</th><th>Status</th><th class="num">Return</th><th class="num">Trades</th></tr></thead>
+        <tbody>
+        {% for b in backtests %}
+          <tr onclick="location='/backtest?id={{ b.id }}'" style="cursor:pointer">
+            <td class="num faint">{{ b.id }}</td>
+            <td class="faint nowrap">{{ b.created_at | hkt }}</td>
+            <td><span class="badge {{ 'good' if b.status=='ok' else ('warn' if b.status=='running' else 'bad') }}">{{ b.status }}</span></td>
+            <td class="num {{ (b.metrics or {}).get('total_return_pct', 0) | cls }}">
+              {{ (b.metrics or {}).get('total_return_pct', 0) | pct }}</td>
+            <td class="num">{{ (b.metrics or {}).get('trades', 0) }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      </div>
+      {% if not backtests %}<div class="empty">No backtests yet</div>{% endif %}
+    </div>
+  </div>
+</div>
+
+{% if current and current.metrics %}
+{% set m = current.metrics %}
+<div class="grid cols-6 mb">
+  <div class="card kpi"><div class="label">Total return</div>
+    <div class="value {{ m.get('total_return_pct',0) | cls }}">{{ m.get('total_return_pct', 0) | pct }}</div>
+    <div class="sub">{{ m.get('period_start','')[:10] }} → {{ m.get('period_end','')[:10] }}</div></div>
+  <div class="card kpi"><div class="label">Max drawdown</div>
+    <div class="value neg">{{ m.get('max_drawdown_pct', 0) | num(2) }}%</div>
+    <div class="sub">peak-to-trough</div></div>
+  <div class="card kpi"><div class="label">Sharpe</div>
+    <div class="value">{{ m.get('sharpe', 0) | num(2) }}</div>
+    <div class="sub">Sortino {{ m.get('sortino', 0) | num(2) }}</div></div>
+  <div class="card kpi"><div class="label">Trades</div>
+    <div class="value">{{ m.get('trades', 0) }}</div>
+    <div class="sub">win rate {{ m.get('win_rate_pct', 0) | num(1) }}%</div></div>
+  <div class="card kpi"><div class="label">Profit factor</div>
+    <div class="value">{{ m.get('profit_factor') | num(2) if m.get('profit_factor') else '∞' }}</div>
+    <div class="sub">avg {{ m.get('avg_r', 0) | num(2) }} R</div></div>
+  <div class="card kpi"><div class="label">Final equity</div>
+    <div class="value">{{ m.get('final_equity', 0) | money('USD') }}</div>
+    <div class="sub">from {{ m.get('initial_cash', 0) | money('USD') }}</div></div>
+</div>
+
+{% if m.get('warnings') %}
+<div class="card mb" style="border-color:var(--warn)"><div class="card-body" style="font-size:12px">
+  {% for w in m.get('warnings') %}<div>⚠ {{ w }}</div>{% endfor %}
+</div></div>
+{% endif %}
+
+<div class="card mb">
+  <div class="card-head"><h2>Equity curve</h2><div style="flex:1"></div>
+    <span class="faint" style="font-size:11px">{{ m.get('bars', 0) }} bars · {{ m.get('duration_s', 0) }}s compute</span></div>
+  <div class="card-body"><div style="height:260px"><canvas id="bt-chart"></canvas></div></div>
+</div>
+
+<div class="grid cols-2">
+  <div class="card">
+    <div class="card-head"><h2>Exit breakdown</h2></div>
+    <div class="card-body">
+      <table class="tbl-compact">
+        <tbody>
+        {% for reason, count in (m.get('exit_breakdown') or {}).items() %}
+          <tr><td><span class="pill">{{ reason | reason }}</span></td><td class="num">{{ count }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-head"><h2>Run details</h2></div>
+    <div class="card-body">
+      <dl class="kv">
+        <dt>Model</dt><dd>{{ m.get('model_id', '—') }}</dd>
+        <dt>Signals</dt><dd>{{ 'champion model' if m.get('use_model') else 'rule-based bootstrap' }}</dd>
+        <dt>Window</dt><dd>{{ (current.config or {}).get('days', 0) }} days</dd>
+        <dt>Avg hold</dt><dd>{{ m.get('avg_hold_bars', 0) }} bars</dd>
+        <dt>Expectancy</dt><dd>{{ m.get('expectancy_r', 0) | num(3) }} R</dd>
+        <dt>Error</dt><dd>{{ current.error or '—' }}</dd>
+      </dl>
+    </div>
+  </div>
+</div>
+
+{% if current.trades %}
+<div class="card mt">
+  <div class="card-head"><h2>Trades</h2><div style="flex:1"></div>
+    <span class="faint" style="font-size:11px">{{ current.trades|length }} shown</span></div>
+  <div class="card-body tight">
+    <div class="tbl-scroll" style="max-height:380px">
+    <table class="tbl-compact">
+      <thead><tr><th>Symbol</th><th class="num">Qty</th><th class="num">Entry</th><th class="num">Exit</th>
+        <th class="num">P&amp;L</th><th class="num">%</th><th class="num">R</th><th>Reason</th><th class="num">Bars</th></tr></thead>
+      <tbody>
+      {% for t in current.trades[:400] %}
+        <tr>
+          <td class="ticker">{{ t.ticker }}</td>
+          <td class="num">{{ t.qty }}</td>
+          <td class="num">{{ t.entry_price }}</td>
+          <td class="num">{{ t.exit_price }}</td>
+          <td class="num {{ t.pnl | cls }}">{{ t.pnl | num(2) }}</td>
+          <td class="num {{ t.pnl_pct | cls }}">{{ t.pnl_pct | pct(2) }}</td>
+          <td class="num {{ t.r_multiple | cls }}">{{ t.r_multiple | num(2) }}</td>
+          <td><span class="pill">{{ t.exit_reason | reason }}</span></td>
+          <td class="num faint">{{ t.hold_bars }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/vendor/chart.umd.min.js"></script>
+<script>
+(function () {
+  const { api, toast, fmt } = UI;
+  const btn = document.getElementById("bt-run");
+  btn?.addEventListener("click", async () => {
+    const body = {
+      days: Number(document.getElementById("bt-days").value),
+      initial_cash: Number(document.getElementById("bt-cash").value),
+      use_model: document.getElementById("bt-model").value === "1",
+    };
+    btn.disabled = true;
+    document.getElementById("bt-status").textContent = "running…";
+    try {
+      const r = await api("/api/backtests", { method: "POST", body });
+      toast("Backtest complete", "ok");
+      window.location = "/backtest?id=" + r.id;
+    } catch (e) {
+      toast(e.message, "error");
+      document.getElementById("bt-status").textContent = "";
+    }
+    btn.disabled = false;
+  });
+
+  const curve = {{ (current.equity_curve if current and current.equity_curve else []) | tojson }};
+  if (curve.length && document.getElementById("bt-chart")) {
+    const vals = curve.map(p => p.equity);
+    const up = vals[vals.length - 1] >= vals[0];
+    new Chart(document.getElementById("bt-chart"), {
+      type: "line",
+      data: { labels: curve.map(p => fmt.time(p.ts)), datasets: [{
+        data: vals, borderColor: up ? "#d1242f" : "#128a4b", borderWidth: 1.6,
+        pointRadius: 0, tension: .2, fill: true,
+        backgroundColor: up ? "rgba(209,36,47,.12)" : "rgba(18,138,75,.12)"
+      }] },
+      options: { responsive: true, maintainAspectRatio: false, animation: false,
+        plugins: { legend: { display: false },
+          tooltip: { callbacks: { label: (i) => " " + fmt.money(i.parsed.y) } } },
+        scales: { x: { ticks: { maxTicksLimit: 6, color: "#8b97a4", font: { size: 10 } }, grid: { display: false } },
+          y: { ticks: { maxTicksLimit: 5, color: "#8b97a4", font: { size: 10 } },
+               grid: { color: "rgba(128,140,155,.12)" } } } }
+    });
+  }
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,154 @@
+{% extends "base.html" %}
+{% block title %}Settings{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Settings</h1>
+  <span class="sub">Every parameter is validated · changes apply to the next run</span>
+  <div style="flex:1"></div>
+  <div class="btn-group">
+    <button class="btn" id="reset-btn">Reset to defaults</button>
+    <button class="btn primary" id="save-btn">Save changes</button>
+  </div>
+</div>
+
+{% if warnings %}
+<div class="card mb" style="border-color:var(--warn)"><div class="card-body" style="font-size:12px">
+  {% for w in warnings %}<div>⚠ {{ w }}</div>{% endfor %}
+</div></div>
+{% endif %}
+
+<div class="card mb">
+  <div class="card-head"><h2>Trading mode</h2><div style="flex:1"></div>
+    <span class="badge {{ mode }}">{{ mode.replace('_',' ') }}</span></div>
+  <div class="card-body">
+    <div class="btn-group">
+      {% for m in ['off','dry_run','paper','live'] %}
+      <button class="btn {{ 'primary' if mode == m else '' }} mode-btn" data-mode="{{ m }}">{{ m.replace('_',' ')|upper }}</button>
+      {% endfor %}
+    </div>
+    <div class="dim mt" style="font-size:12px">
+      <strong>dry run</strong> computes everything and records intents without sending orders ·
+      <strong>paper</strong> sends orders to IB Gateway :4002 ·
+      <strong>live</strong> requires <code>ALLOW_LIVE=1</code> and <code>IB_PORT=4001</code> in <code>.env</code>.
+    </div>
+  </div>
+</div>
+
+<form id="settings-form">
+{% for section, fields in sections.items() %}
+<div class="card mb">
+  <div class="card-head"><h2>{{ section.replace('_',' ')|title }}</h2>
+    <div style="flex:1"></div><span class="faint" style="font-size:11px">{{ fields|length }} fields</span></div>
+  <div class="card-body">
+    <div class="grid cols-3" style="gap:12px">
+      {% for f in fields %}
+      <label class="field" title="{{ f.description }}">
+        <span>{{ f.title }}{% if f.key in ['mode','approval_mode'] %} <span class="pill">core</span>{% endif %}</span>
+        {% if f.type == 'boolean' %}
+          <select data-key="{{ f.key }}" data-type="boolean">
+            <option value="true" {{ 'selected' if values[f.key] else '' }}>true</option>
+            <option value="false" {{ 'selected' if not values[f.key] else '' }}>false</option>
+          </select>
+        {% elif f.enum %}
+          <select data-key="{{ f.key }}" data-type="string">
+            {% for opt in f.enum %}
+            <option value="{{ opt }}" {{ 'selected' if values[f.key] == opt else '' }}>{{ opt }}</option>
+            {% endfor %}
+          </select>
+        {% elif f.type in ('integer','number') %}
+          <input type="number" data-key="{{ f.key }}" data-type="{{ f.type }}"
+                 value="{{ values[f.key] }}"
+                 {% if f.minimum is not none %}min="{{ f.minimum }}"{% endif %}
+                 {% if f.maximum is not none %}max="{{ f.maximum }}"{% endif %}
+                 {% if f.type == 'number' %}step="any"{% endif %}>
+        {% elif f.type == 'array' or f.type == 'object' %}
+          <input type="text" data-key="{{ f.key }}" data-type="json"
+                 value='{{ values[f.key] | tojson }}'>
+        {% else %}
+          <input type="text" data-key="{{ f.key }}" data-type="string" value="{{ values[f.key] }}">
+        {% endif %}
+      </label>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endfor %}
+</form>
+
+<div class="card">
+  <div class="card-head"><h2>Audit trail</h2></div>
+  <div class="card-body tight">
+    <div class="tbl-scroll" style="max-height:260px">
+    <table class="tbl-compact">
+      <thead><tr><th>Time</th><th>Key</th><th>Old</th><th>New</th><th>Source</th></tr></thead>
+      <tbody>
+      {% for a in audit %}
+        <tr>
+          <td class="faint nowrap">{{ a.ts | hkt }}</td>
+          <td class="mono">{{ a.key }}</td>
+          <td class="dim">{{ a.old_value | tojson }}</td>
+          <td>{{ a.new_value | tojson }}</td>
+          <td class="faint">{{ a.source }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% if not audit %}<div class="empty">No changes recorded</div>{% endif %}
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  const { api, toast, confirmDialog } = UI;
+
+  function collect() {
+    const values = {};
+    document.querySelectorAll("#settings-form [data-key]").forEach(el => {
+      const key = el.dataset.key, type = el.dataset.type;
+      let v;
+      if (type === "boolean") v = el.value === "true";
+      else if (type === "integer") v = parseInt(el.value, 10);
+      else if (type === "number") v = parseFloat(el.value);
+      else if (type === "json") { try { v = JSON.parse(el.value); } catch (e) { throw new Error("Invalid JSON for " + key); } }
+      else v = el.value;
+      if (typeof v === "number" && Number.isNaN(v)) return;
+      values[key] = v;
+    });
+    return values;
+  }
+
+  document.getElementById("save-btn").addEventListener("click", async () => {
+    let values;
+    try { values = collect(); } catch (e) { toast(e.message, "error"); return; }
+    try {
+      const r = await api("/api/settings", { method: "PUT", body: { values } });
+      toast(`Saved ${r.changed} change(s)`, "ok");
+      setTimeout(() => location.reload(), 700);
+    } catch (e) { toast(e.message, "error"); }
+  });
+
+  document.getElementById("reset-btn").addEventListener("click", async () => {
+    const ok = await confirmDialog("Reset settings", "Discard all UI overrides and restore config/default.yaml?", true);
+    if (!ok) return;
+    try { await api("/api/settings/reset", { method: "POST", body: {} });
+      toast("Defaults restored", "ok"); setTimeout(() => location.reload(), 700); }
+    catch (e) { toast(e.message, "error"); }
+  });
+
+  document.querySelectorAll(".mode-btn").forEach(b => b.addEventListener("click", async () => {
+    const mode = b.dataset.mode;
+    if (mode === "live") {
+      const ok = await confirmDialog("Enable LIVE trading",
+        "LIVE sends real orders to your funded account. This requires ALLOW_LIVE=1 and port 4001. Continue?", true);
+      if (!ok) return;
+    }
+    try { await api("/api/mode", { method: "POST", body: { mode } });
+      toast("Mode set to " + mode.toUpperCase(), "ok"); setTimeout(() => location.reload(), 700); }
+    catch (e) { toast(e.message, "error"); }
+  }));
+})();
+</script>
+{% endblock %}

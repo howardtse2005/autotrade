@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <title>{% block title %}Autotrade{% endblock %} · Autotrade</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%231f6feb'/><path d='M8 21l5-6 4 4 7-9' stroke='white' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+  {% block head %}{% endblock %}
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">A</div>
+      <div>
+        <div class="brand-name">Autotrade</div>
+        <div class="brand-sub">IBKR · FinBERT · ML</div>
+      </div>
+    </div>
+    <nav class="nav">
+      {% set items = [
+        ('/', 'dashboard', 'Dashboard'),
+        ('/pipeline', 'pipeline', 'Pipeline'),
+        ('/positions', 'positions', 'Positions'),
+        ('/orders', 'orders', 'Orders & Trades'),
+        ('/backtest', 'backtest', 'Backtest'),
+        ('/models', 'models', 'Models'),
+        ('/settings', 'settings', 'Settings'),
+        ('/logs', 'logs', 'Logs')
+      ] %}
+      {% for href, key, label in items %}
+      <a href="{{ href }}" class="{{ 'active' if active == key else '' }}">
+        {% if key == 'dashboard' %}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
+        {% elif key == 'pipeline' %}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h7M4 12h12M4 18h5"/><circle cx="18" cy="6" r="2"/><circle cx="18" cy="18" r="2"/></svg>
+        {% elif key == 'positions' %}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17l5-6 4 4 8-9"/><path d="M16 6h5v5"/></svg>
+        {% elif key == 'orders' %}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M4 12h16M4 17h10"/></svg>
+        {% elif key == 'backtest' %}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V5M4 19h16"/><path d="M7 15l3-4 3 2 4-6"/></svg>
+        {% elif key == 'models' %}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg>
+        {% elif key == 'settings' %}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 7 19.4a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.7 1.7 0 0 0 2.6 14H2.5a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 7a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.7 1.7 0 0 0 10 2.6V2.5a2 2 0 1 1 4 0v.1A1.7 1.7 0 0 0 17 4.6a1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.5 1h.1a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+        {% else %}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+        {% endif %}
+        <span>{{ label }}</span>
+      </a>
+      {% endfor %}
+    </nav>
+    <div class="nav-foot">
+      <div>All times HKT</div>
+      <div id="uptime" class="faint"></div>
+    </div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <span id="mode-badge" class="badge {{ mode }}">{{ mode.replace('_',' ') }}</span>
+      <div class="status-item"><span id="ib-dot" class="dot"></span><span id="ib-text">IB —</span></div>
+      <div class="status-item"><span class="dot" id="mkt-dot"></span><span id="mkt-text">Market —</span></div>
+      <div class="status-item">Next run <strong id="next-run">—</strong></div>
+      <div class="status-item" id="model-badge-wrap"><span class="badge neutral" id="model-badge">MODEL —</span></div>
+      <div class="status-item"><span id="breaker-dot" class="dot ok"></span><span id="breaker-text">Breakers OK</span></div>
+      <div class="spacer"></div>
+      <button class="btn danger sm" id="kill-btn">Kill switch</button>
+    </header>
+
+    <main class="content">
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+</div>
+
+<div class="modal-back" id="confirm-modal">
+  <div class="modal">
+    <div class="card-head"><h2 id="confirm-title">Confirm</h2></div>
+    <div class="card-body"><p id="confirm-msg" style="margin:0"></p></div>
+    <div class="actions">
+      <button class="btn" id="confirm-cancel">Cancel</button>
+      <button class="btn primary" id="confirm-ok">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/js/app.js"></script>
+<script>
+(function () {
+  const { fmt } = UI;
+  let cd = null;
+
+  async function refreshStatus() {
+    try {
+      const s = await UI.api("/api/status");
+      const modeEl = document.getElementById("mode-badge");
+      modeEl.className = "badge " + s.mode;
+      modeEl.textContent = s.mode.replace("_", " ");
+
+      const ib = s.ib;
+      document.getElementById("ib-dot").className = "dot " + (ib.connected ? (ib.market_data_ok ? "ok" : "warn") : "bad");
+      document.getElementById("ib-text").innerHTML = ib.connected
+        ? `IB connected${ib.market_data_ok ? "" : ' · <span class="dim">no mkt data</span>'}`
+        : "IB disconnected";
+
+      const m = s.market;
+      document.getElementById("mkt-dot").className = "dot " + (m.open ? "ok" : "");
+      document.getElementById("mkt-text").textContent = m.open
+        ? `Market open · closes ${fmt.time(m.close_at, false)}`
+        : `Market closed · opens ${fmt.time(m.next_open, false)}`;
+
+      const mb = document.getElementById("model-badge");
+      if (s.model.ready) {
+        mb.className = "badge good";
+        mb.textContent = "MODEL " + s.model.model_id.slice(-11);
+      } else {
+        mb.className = "badge warn";
+        mb.textContent = "BOOTSTRAP";
+      }
+      const br = document.getElementById("breaker-dot");
+      const bt = document.getElementById("breaker-text");
+      if (s.kill_switch) { br.className = "dot bad"; bt.textContent = "KILL SWITCH"; }
+      else if (s.paused) { br.className = "dot warn"; bt.textContent = "Paused"; }
+      else { br.className = "dot ok"; bt.textContent = "Breakers OK"; }
+
+      const up = Math.round(s.uptime_s);
+      document.getElementById("uptime").textContent = `up ${Math.floor(up/3600)}h ${Math.floor((up%3600)/60)}m`;
+
+      const nextEl = document.getElementById("next-run");
+      if (cd) clearInterval(cd);
+      cd = UI.countdown(s.next_run, nextEl);
+      window.__status = s;
+      document.dispatchEvent(new CustomEvent("status", { detail: s }));
+    } catch (e) { /* offline */ }
+  }
+
+  document.getElementById("kill-btn").addEventListener("click", async () => {
+    const ok = await UI.confirmDialog(
+      "Kill switch",
+      "This cancels working entry orders, closes all positions and pauses the pipeline. Continue?",
+      true
+    );
+    if (!ok) return;
+    try {
+      const r = await UI.api("/api/killswitch", { method: "POST", body: {} });
+      UI.toast("Kill switch engaged. Closed: " + (r.closed.join(", ") || "none"), "error");
+      refreshStatus();
+    } catch (e) { UI.toast("Kill switch failed: " + e.message, "error"); }
+  });
+
+  refreshStatus();
+  setInterval(refreshStatus, 15000);
+
+  UI.connectSSE((ev) => {
+    if (ev.topic === "run.done") { refreshStatus(); UI.toast("Pipeline run " + ev.status, ev.status === "ok" ? "ok" : "error"); }
+    if (ev.topic === "run.start") refreshStatus();
+    if (ev.topic === "alert" && ev.level !== "info") UI.toast(ev.message, ev.level === "critical" ? "error" : "");
+    document.dispatchEvent(new CustomEvent("sse", { detail: ev }));
+  });
+})();
+</script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

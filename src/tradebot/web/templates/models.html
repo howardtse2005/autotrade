@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+{% block title %}Models{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Models</h1>
+  <span class="sub">Tri-Lens stack · purged walk-forward · isotonic calibration</span>
+  <div style="flex:1"></div>
+  <button class="btn primary" id="train-btn">Train new model</button>
+</div>
+
+{% set cm = (champion_meta or {}).get('metrics', {}) %}
+<div class="grid cols-4 mb">
+  <div class="card kpi">
+    <div class="label">Champion</div>
+    <div class="value" style="font-size:15px">{{ champion_id or 'none' }}</div>
+    <div class="sub">{{ 'trained ' + (champion_meta or {}).get('train_end', '—')[:10] if champion_meta else 'no model registered' }}</div>
+  </div>
+  <div class="card kpi"><div class="label">OOF AUC</div>
+    <div class="value">{{ cm.get('auc') | num(3) if cm.get('auc') else '—' }}</div>
+    <div class="sub">IC {{ cm.get('ic') | num(3) if cm.get('ic') else '—' }}</div></div>
+  <div class="card kpi"><div class="label">Brier / logloss</div>
+    <div class="value" style="font-size:17px">{{ cm.get('brier') | num(3) if cm.get('brier') else '—' }}
+      <span class="faint" style="font-size:13px">/ {{ cm.get('logloss') | num(3) if cm.get('logloss') else '—' }}</span></div>
+    <div class="sub">{{ cm.get('n', 0)|int }} out-of-fold rows</div></div>
+  <div class="card kpi"><div class="label">Stack</div>
+    <div class="value" style="font-size:15px">{{ 'lens average' if cm.get('use_average') else 'meta-learner' }}</div>
+    <div class="sub">{{ cm.get('folds', 0)|int }} walk-forward folds</div></div>
+</div>
+
+{% set th = (champion_meta or {}).get('thresholds', {}) %}
+{% set st = th.get('stats', {}) %}
+<div class="grid cols-4 mb">
+  <div class="card kpi"><div class="label">OOF edge (top decile)</div>
+    <div class="value {{ st.get('top_decile_mean_r', 0) | cls }}">{{ '%+.3f'|format(st.get('top_decile_mean_r', 0)) }}R</div>
+    <div class="sub">{{ st.get('top_decile_trades', 0) }} trades · hit {{ '%.0f'|format((st.get('top_decile_hit_rate', 0))*100) }}%</div></div>
+  <div class="card kpi"><div class="label">Edge verified</div>
+    <div class="value" style="font-size:17px">
+      {% if th.get('edge_verified') %}<span class="badge good">YES</span>
+      {% else %}<span class="badge warn">NO</span>{% endif %}</div>
+    <div class="sub">universe mean {{ '%+.3f'|format(st.get('universe_mean_r', 0)) }}R</div></div>
+  <div class="card kpi"><div class="label">Entry gate</div>
+    <div class="value">{{ '%.0f'|format((1 - (th.get('min_bar_pct') or 0)) * 100) }}<span style="font-size:13px">%</span></div>
+    <div class="sub">
+      {% if th.get('mode') == 'cross_sectional' %}
+        top {{ '%.0f'|format((1 - (th.get('min_bar_pct') or 0)) * 100) }}% of p(win) per run
+        ({{ '%.1f'|format(st.get('selected_per_bar', 0)) }} names)
+      {% else %}
+        absolute p(win) ≥ {{ '%.3f'|format(th.get('buy_threshold', 0)) }}
+      {% endif %}
+    </div></div>
+  <div class="card kpi"><div class="label">Selection</div>
+    <div class="value" style="font-size:15px">{{ 'cross-sectional' if th.get('mode') == 'cross_sectional' else 'absolute cut' }}</div>
+    <div class="sub">entry timing: drop worst {{ '%.0f'|format((th.get('min_entry_pct') or 0) * 100) }}% · gate {{ cfg.strategy.edge_gate_mode }}</div></div>
+</div>
+
+{% if not champion_id %}
+<div class="card mb" style="border-color:var(--warn)"><div class="card-body">
+  <strong>Bootstrap mode.</strong> <span class="dim">No trained model is registered, so the bot uses rule-based
+  signals (RSI + MACD + trend + FinBERT gate) and PAPER/LIVE entries are blocked until a model exists.
+  Press “Train new model” to fit one from cached bars.</span>
+</div></div>
+{% endif %}
+
+<div class="card mb">
+  <div class="card-head"><h2>Registry</h2></div>
+  <div class="card-body tight">
+    <table>
+      <thead><tr><th>Model ID</th><th>Status</th><th>Created</th><th class="num">Rows</th>
+        <th class="num">Features</th><th class="num">AUC</th><th class="num">IC</th><th class="num">Brier</th><th></th></tr></thead>
+      <tbody>
+      {% for m in models %}
+        {% set mm = m.metrics or {} %}
+        <tr>
+          <td class="mono">{{ m.model_id }}</td>
+          <td><span class="badge {{ 'good' if m.status=='champion' else ('warn' if m.status=='challenger' else 'off') }}">{{ m.status }}</span></td>
+          <td class="faint nowrap">{{ m.created_at | hkt }}</td>
+          <td class="num">{{ m.rows }}</td>
+          <td class="num">{{ m.features }}</td>
+          <td class="num">{{ mm.get('auc') | num(3) if mm.get('auc') else '—' }}</td>
+          <td class="num">{{ mm.get('ic') | num(3) if mm.get('ic') else '—' }}</td>
+          <td class="num">{{ mm.get('brier') | num(3) if mm.get('brier') else '—' }}</td>
+          <td class="num">
+            {% if m.status != 'champion' %}
+            <button class="btn sm promote" data-id="{{ m.model_id }}">Promote</button>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% if not models %}<div class="empty">No models registered yet</div>{% endif %}
+  </div>
+</div>
+
+<div class="split">
+  <div class="card">
+    <div class="card-head"><h2>Training configuration</h2></div>
+    <div class="card-body">
+      <dl class="kv">
+        <dt>Horizon</dt><dd>{{ cfg.ml.horizon_bars }} bars (≈ {{ (cfg.ml.horizon_bars * cfg.data.bar_minutes / 60)|round(1) }}h)</dd>
+        <dt>Barriers</dt><dd>TP {{ cfg.ml.label_tp_atr }} ATR · SL {{ cfg.ml.label_sl_atr }} ATR</dd>
+        <dt>Walk-forward</dt><dd>{{ cfg.ml.cv_splits }} folds · purge {{ cfg.ml.purge_bars }} · embargo {{ cfg.ml.embargo_bars }}</dd>
+        <dt>Train window</dt><dd>{{ cfg.ml.train_window_days }} days</dd>
+        <dt>Rows (cap)</dt><dd>{{ cfg.ml.max_train_rows }}</dd>
+        <dt>SVM top-K</dt><dd>{{ cfg.ml.svm_top_k_features }} features, ≤ {{ cfg.ml.svm_max_train_rows }} rows</dd>
+        <dt>Feature groups</dt><dd>{{ cfg.ml.feature_groups }}</dd>
+        <dt>Promotion rule</dt><dd>OOS IC ≥ champion − {{ cfg.ml.max_auc_drop }}</dd>
+      </dl>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2>Folds (champion)</h2></div>
+    <div class="card-body tight">
+      <table class="tbl-compact">
+        <thead><tr><th class="num">#</th><th>Test window</th><th class="num">Train rows</th><th class="num">Test rows</th></tr></thead>
+        <tbody>
+        {% for f in (champion_meta or {}).get('folds', []) %}
+          <tr><td class="num faint">{{ f.fold }}</td>
+            <td class="faint">{{ f.test_start }} → {{ f.test_end }}</td>
+            <td class="num">{{ f.train_rows }}</td><td class="num">{{ f.test_rows }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% if not (champion_meta or {}).get('folds') %}<div class="empty">No fold data</div>{% endif %}
+    </div>
+  </div>
+</div>
+
+{% if champion_meta and champion_meta.get('notes') %}
+<div class="card mt"><div class="card-body dim" style="font-size:12px">
+  <strong>Notes:</strong> {{ champion_meta.get('notes') }}
+  {% if cm.get('stage_seconds') %} · stage timings {{ cm.get('stage_seconds') }}{% endif %}
+</div></div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  const { api, toast } = UI;
+  document.getElementById("train-btn").addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    try {
+      await api("/api/models/train", { method: "POST", body: { promote: true } });
+      toast("Training started in the background — this page will refresh when done");
+      setTimeout(() => location.reload(), 120000);
+    } catch (err) { toast(err.message, "error"); e.target.disabled = false; }
+  });
+  document.querySelectorAll(".promote").forEach(b => b.addEventListener("click", async () => {
+    try { await api(`/api/models/${b.dataset.id}/promote`, { method: "POST", body: {} });
+      toast("Promoted", "ok"); setTimeout(() => location.reload(), 600); }
+    catch (e) { toast(e.message, "error"); }
+  }));
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,171 @@
+{% extends "base.html" %}
+{% block title %}Positions{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Positions</h1>
+  <span class="sub">{{ positions|selectattr('qty','gt',0)|list|length }} long · {{ positions|length }} total · delayed prices</span>
+  <div style="flex:1"></div>
+  <div class="btn-group">
+    <button class="btn" id="reprotect-all">Re-protect all</button>
+    <button class="btn danger" id="close-all">Close all</button>
+  </div>
+</div>
+
+{% if status.ib.competing_session %}
+<div class="card mb" style="border-color:var(--warn)"><div class="card-body dim" style="font-size:12px">
+  IBKR market data is blocked by a competing session — “Last” prices come from yfinance and are ~15 min delayed.
+  Stops and targets live server-side at IBKR and are unaffected.
+</div></div>
+{% endif %}
+
+<div class="card mb">
+  <div class="card-head"><h2>Open positions</h2><div style="flex:1"></div>
+    <span class="faint" style="font-size:11px">SL / TP are editable — they modify the live IBKR orders</span></div>
+  <div class="card-body tight">
+    {% if positions %}
+    <table id="pos-table">
+      <thead><tr>
+        <th>Symbol</th><th class="num">Qty</th><th class="num">Avg cost</th><th class="num">Last</th>
+        <th class="num">Mkt value</th><th class="num">Unreal $</th><th class="num">Unreal %</th>
+        <th class="num">R</th><th class="num">Stop loss</th><th class="num">Take profit</th>
+        <th class="num">Held</th><th>Source</th><th class="right">Actions</th>
+      </tr></thead>
+      <tbody>
+      {% for p in positions %}
+        <tr data-ticker="{{ p.ticker }}">
+          <td class="ticker">{{ p.ticker }}
+            {% if p.trail_active %}<span class="pill" title="trailing active">trail</span>{% endif %}
+          </td>
+          <td class="num">{{ p.qty|int }}</td>
+          <td class="num">{{ p.avg_cost | num }}</td>
+          <td class="num">{{ p.last | num }}</td>
+          <td class="num">{{ p.market_value | num(0) }}</td>
+          <td class="num {{ p.unrealized_pnl | cls }}">{{ p.unrealized_pnl | num(2) }}</td>
+          <td class="num {{ p.unrealized_pct | cls }}">{{ p.unrealized_pct | pct(2) }}</td>
+          <td class="num {{ p.unrealized_r | cls }}">{{ p.unrealized_r | num(2) }}</td>
+          <td class="num">
+            <input class="sl-input" type="number" step="0.01" value="{{ '%.2f'|format(p.sl) if p.sl else '' }}"
+                   style="width:88px;text-align:right" data-ticker="{{ p.ticker }}" data-kind="sl">
+          </td>
+          <td class="num">
+            <input class="tp-input" type="number" step="0.01" value="{{ '%.2f'|format(p.tp) if p.tp else '' }}"
+                   style="width:88px;text-align:right" data-ticker="{{ p.ticker }}" data-kind="tp">
+          </td>
+          <td class="num faint">{{ p.bars_held }}b</td>
+          <td>
+            {% if p.external %}<span class="badge warn" title="position opened outside the bot">external</span>
+            {% elif p.ib_stop_id and p.ib_tp_id %}<span class="badge good">protected</span>
+            {% else %}<span class="badge bad">naked</span>{% endif %}
+          </td>
+          <td class="right nowrap">
+            <div class="btn-group" style="justify-content:flex-end">
+              <button class="btn sm save-stops" data-ticker="{{ p.ticker }}">Save</button>
+              <button class="btn sm close-pos" data-ticker="{{ p.ticker }}" data-pct="25">25%</button>
+              <button class="btn sm close-pos" data-ticker="{{ p.ticker }}" data-pct="50">50%</button>
+              <button class="btn sm danger close-pos" data-ticker="{{ p.ticker }}" data-pct="100">Close</button>
+            </div>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="empty">No open positions</div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="grid cols-2">
+  <div class="card">
+    <div class="card-head"><h2>Portfolio risk</h2></div>
+    <div class="card-body">
+      <dl class="kv">
+        <dt>Net liquidation</dt><dd>{{ account.net_liq | money(account.currency) }}</dd>
+        <dt>Gross exposure</dt><dd>{{ account.gross_position_value | money(account.currency) }}</dd>
+        <dt>Excess liquidity</dt><dd>{{ account.excess_liquidity | money(account.currency) }} ({{ '%.1f'|format(account.excess_liq_pct) }}%)</dd>
+        <dt>Init / maint margin</dt><dd>{{ account.init_margin | money(account.currency) }} / {{ account.maint_margin | money(account.currency) }}</dd>
+        <dt>Risk per trade</dt><dd>{{ cfg.risk.risk_per_trade_pct }}% of net liq</dd>
+        <dt>Daily loss limit</dt><dd>−{{ cfg.risk.daily_loss_limit_pct }}% ({{ (account.net_liq * cfg.risk.daily_loss_limit_pct / 100) | money(account.currency) }})</dd>
+        <dt>Max positions</dt><dd>{{ cfg.strategy.max_positions }}</dd>
+      </dl>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-head"><h2>Guardrails</h2></div>
+    <div class="card-body">
+      <dl class="kv">
+        <dt>Stop / target</dt><dd>{{ cfg.risk.sl_atr }} ATR / {{ cfg.risk.tp_atr }} ATR</dd>
+        <dt>Time stop</dt><dd>{{ cfg.risk.time_stop_bars }} bars</dd>
+        <dt>Trailing</dt><dd>after +{{ cfg.risk.trail_trigger_r }}R → {{ cfg.risk.trail_atr_mult }}×ATR</dd>
+        <dt>Flatten EOD</dt><dd>{{ 'on' if cfg.pipeline.flatten_eod else 'off' }}</dd>
+        <dt>Cooldown after stop</dt><dd>{{ cfg.risk.cooldown_after_stop_minutes }} min</dd>
+        <dt>Protective orders</dt><dd>{{ cfg.execution.protective_orders }} (GTC at IBKR)</dd>
+        <dt>Mode</dt><dd><span class="badge {{ mode }}">{{ mode.replace('_',' ') }}</span></dd>
+      </dl>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  const { api, toast, confirmDialog, fmt } = UI;
+
+  document.querySelectorAll(".save-stops").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const t = btn.dataset.ticker;
+      const sl = document.querySelector(`.sl-input[data-ticker="${t}"]`).value;
+      const tp = document.querySelector(`.tp-input[data-ticker="${t}"]`).value;
+      if (!sl && !tp) { toast("Enter a stop or target first", "error"); return; }
+      btn.disabled = true;
+      try {
+        const r = await api(`/api/positions/${t}/stops`, {
+          method: "PUT", body: { sl: sl ? parseFloat(sl) : null, tp: tp ? parseFloat(tp) : null }
+        });
+        toast(r.dry_run ? r.message : `${t} stops updated`, "ok");
+      } catch (e) { toast(e.message, "error"); }
+      btn.disabled = false;
+    });
+  });
+
+  document.querySelectorAll(".close-pos").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const t = btn.dataset.ticker, pct = btn.dataset.pct;
+      const ok = await confirmDialog(
+        `Close ${pct}% of ${t}`,
+        `This sends a market SELL for ${pct}% of the ${t} position and cancels its protective orders.`,
+        pct === "100"
+      );
+      if (!ok) return;
+      try {
+        const r = await api(`/api/positions/${t}/close`, { method: "POST", body: { pct: Number(pct) } });
+        toast(r.dry_run ? r.message : `${t} close sent (${r.status})`, "ok");
+        setTimeout(() => location.reload(), 1200);
+      } catch (e) { toast(e.message, "error"); }
+    });
+  });
+
+  document.getElementById("close-all").addEventListener("click", async () => {
+    const ok = await confirmDialog("Close all positions",
+      "This cancels every protective order and sends market SELLs for all long positions.", true);
+    if (!ok) return;
+    try {
+      const r = await api("/api/positions/close-all", { method: "POST", body: {} });
+      toast(r.dry_run ? r.message : "Closing: " + (r.closed.join(", ") || "none"), "ok");
+      setTimeout(() => location.reload(), 1500);
+    } catch (e) { toast(e.message, "error"); }
+  });
+
+  document.getElementById("reprotect-all").addEventListener("click", async () => {
+    const rows = [...document.querySelectorAll("#pos-table tbody tr")].map(r => r.dataset.ticker);
+    let ok = 0, fail = 0;
+    for (const t of rows) {
+      try { await api(`/api/positions/${t}/reprotect`, { method: "POST", body: {} }); ok++; }
+      catch (e) { fail++; }
+    }
+    toast(`Re-protected ${ok} position(s)${fail ? `, ${fail} failed` : ""}`, fail ? "error" : "ok");
+  });
+})();
+</script>
+{% endblock %}

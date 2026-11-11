@@ -1,0 +1,346 @@
+{% extends "base.html" %}
+{% block title %}Pipeline{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Pipeline</h1>
+  {% if run %}<span class="sub">Run #{{ run.id }} · {{ run.started_at | hkt }} HKT · {{ run.trigger }}</span>{% endif %}
+  <div style="flex:1"></div>
+  <div class="btn-group">
+    <select id="run-select" style="min-width:210px">
+      {% for r in runs %}
+      <option value="{{ r.id }}" {{ 'selected' if run and r.id == run.id else '' }}>
+        #{{ r.id }} · {{ r.started_at | hkt }} · {{ r.status }}
+      </option>
+      {% endfor %}
+    </select>
+    <button class="btn primary" id="run-now">Run now</button>
+  </div>
+</div>
+
+{% if not run %}
+<div class="card"><div class="empty">No pipeline runs yet. Press “Run now” to execute the full pipeline.</div></div>
+{% else %}
+
+{% set f = run.funnel or {} %}
+<div class="grid cols-4 mb">
+  <div class="card kpi"><div class="label">Status</div>
+    <div class="value" style="font-size:17px">
+      <span class="badge {{ 'good' if run.status=='ok' else ('warn' if run.status=='partial' else 'bad') }}">{{ run.status }}</span>
+    </div>
+    <div class="sub">{{ (run.duration_ms/1000)|round(1) }}s total</div>
+  </div>
+  <div class="card kpi"><div class="label">Funnel</div>
+    <div class="value" style="font-size:15px">{{ f.get('universe',0) }} → {{ f.get('with_news',0) }} → {{ f.get('passed_gates',0) }} → {{ f.get('selected',0) }}</div>
+    <div class="sub">universe · news · gates · selected</div>
+  </div>
+  <div class="card kpi"><div class="label">News coverage</div>
+    <div class="value">{{ f.get('coverage_pct', 0) }}%</div>
+    <div class="sub">{{ f.get('news_items', 0) }} items · {{ f.get('news_scored', 0) }} scored</div>
+  </div>
+  <div class="card kpi"><div class="label">Orders</div>
+    <div class="value">{{ f.get('orders', 0) }}</div>
+    <div class="sub">{{ f.get('exits', 0) }} exits · model {{ run.model_id or 'bootstrap' }}</div>
+  </div>
+</div>
+
+<div class="card mb">
+  <div class="card-head"><h2>Stage timeline</h2><div style="flex:1"></div>
+    <span class="faint" style="font-size:11px">width ∝ duration</span></div>
+  <div class="card-body">
+    {% if run.stage_timings %}
+    <div class="timeline">
+      {% for st in run.stage_timings %}
+        {% set w = [22, (st.ms / 120)|round(0,'ceil')|int]|max %}
+        <div class="seg {{ st.status }}" style="width:{{ w }}px" title="{{ st.name }} · {{ st.status }} · {{ (st.ms/1000)|round(2) }}s">
+          {{ st.name.split('_')[0] }}
+        </div>
+      {% endfor %}
+    </div>
+    <div style="display:flex;gap:16px;margin-top:10px;flex-wrap:wrap">
+      {% for st in run.stage_timings %}
+      <div style="font-size:11.5px">
+        <span class="badge {{ 'good' if st.status=='ok' else ('warn' if st.status in ('warn','timeout') else 'bad') }}">{{ st.status }}</span>
+        <strong>{{ st.name }}</strong>
+        <span class="faint">{{ (st.ms/1000)|round(2) }}s</span>
+        {% if st.detail %}<span class="dim">— {{ st.detail }}</span>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}<div class="empty">No stage data</div>{% endif %}
+    {% if run.error %}<div class="mt neg">{{ run.error }}</div>{% endif %}
+  </div>
+</div>
+
+<div class="card mb">
+  <div class="card-head"><h2>ML decisions</h2><div style="flex:1"></div>
+    <input id="dec-filter" placeholder="Filter ticker…" style="width:150px"></div>
+  <div class="card-body tight">
+    <div class="tbl-scroll">
+    <table id="dec-table">
+      <thead><tr>
+        <th>Ticker</th><th class="num">Rank</th><th class="num">p(win)</th><th class="num">E[R]</th>
+        <th class="num">vol̂</th><th class="num">p(entry)</th><th class="num">Disagr</th>
+        <th class="num">ML score</th><th>Action</th><th>Reason</th><th class="num">Qty</th>
+        <th class="num">SL</th><th class="num">TP</th><th>Top SHAP</th>
+      </tr></thead>
+      <tbody>
+      {% for d in decisions %}
+        {% set p = preds.get(d.ticker) %}
+        <tr data-ticker="{{ d.ticker }}">
+          <td class="ticker"><a href="#" class="ticker-link" data-ticker="{{ d.ticker }}">{{ d.ticker }}</a></td>
+          <td class="num">{{ d.rank or '—' }}</td>
+          <td class="num">{{ p.p_win | num(3) if p else '—' }}</td>
+          <td class="num {{ (p.expected_r if p else 0) | cls }}">{{ p.expected_r | num(3) if p else '—' }}</td>
+          <td class="num">{{ '%.2f%%'|format((p.vol_hat or 0) * 100) if p else '—' }}</td>
+          <td class="num">{{ p.p_entry | num(3) if p else '—' }}</td>
+          <td class="num">{{ p.disagreement | num(3) if p else '—' }}</td>
+          <td class="num">{{ p.ml_score | num(0) if p else '—' }}</td>
+          <td><span class="badge {{ 'good' if d.action=='BUY' else ('warn' if d.action=='SELL' else ('neutral' if d.action=='HOLD' else 'off')) }}">{{ d.action }}</span></td>
+          <td class="dim" style="font-size:11.5px">
+            {% for c in (d.reason_codes or []) %}<span class="pill" title="{{ c }}">{{ c | reason }}</span> {% endfor %}
+          </td>
+          <td class="num">{{ d.planned_qty or '—' }}</td>
+          <td class="num">{{ d.planned_sl | num if d.planned_sl else '—' }}</td>
+          <td class="num">{{ d.planned_tp | num if d.planned_tp else '—' }}</td>
+          <td class="faint" style="font-size:11px">
+            {% if p and p.shap_top3 %}{% for name, val in p.shap_top3[:3] %}{{ name }} {% endfor %}{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% if not decisions %}<div class="empty">No decisions in this run</div>{% endif %}
+  </div>
+</div>
+
+<div class="split mb">
+  <div class="card">
+    <div class="card-head"><h2>Universe</h2><div style="flex:1"></div>
+      <span class="faint" style="font-size:11px">{{ universe|length }} screened</span></div>
+    <div class="card-body tight">
+      <div class="tbl-scroll" style="max-height:360px">
+      <table class="tbl-compact">
+        <thead><tr><th class="num">#</th><th>Ticker</th><th class="num">Price</th><th class="num">Chg</th><th class="num">RelVol</th><th>Sector</th><th class="num">Score</th></tr></thead>
+        <tbody>
+        {% for u in universe %}
+          <tr>
+            <td class="num faint">{{ u.rank }}</td>
+            <td class="ticker">{{ u.ticker }}{% if u.is_held %} <span class="pill">held</span>{% endif %}</td>
+            <td class="num">{{ u.price | num }}</td>
+            <td class="num {{ u.change_pct | cls }}">{{ u.change_pct | pct(1) }}</td>
+            <td class="num">{{ u.rel_volume | num(2) }}</td>
+            <td class="dim" style="font-size:11.5px">{{ u.sector[:22] }}</td>
+            <td class="num">{{ u.screen_score | num(2) }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2>Connector health</h2></div>
+    <div class="card-body tight">
+      <table class="tbl-compact">
+        <thead><tr><th>Source</th><th class="num">Items</th><th class="num">Latency</th><th>Status</th></tr></thead>
+        <tbody>
+        {% for c in connectors %}
+          <tr>
+            <td>{{ c.name }}</td>
+            <td class="num">{{ c.items_last_run }}</td>
+            <td class="num faint">{{ c.latency_ms }}ms</td>
+            <td>
+              {% if c.last_error and c.consecutive_failures > 0 %}
+                <span class="badge bad">error</span>
+                <span class="faint" style="font-size:11px">{{ c.last_error[:40] }}</span>
+              {% elif c.enabled %}
+                <span class="badge good">ok</span>
+              {% else %}
+                <span class="badge off">disabled</span>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="card mb">
+  <div class="card-head"><h2>News feed</h2><div style="flex:1"></div>
+    <select id="news-label-filter">
+      <option value="">All labels</option><option value="positive">Positive</option>
+      <option value="negative">Negative</option><option value="neutral">Neutral</option>
+    </select>
+    <input id="news-filter" placeholder="Filter ticker…" style="width:140px">
+  </div>
+  <div class="card-body tight">
+    <div class="tbl-scroll" style="max-height:420px">
+    <table id="news-table">
+      <thead><tr><th class="nowrap">Time</th><th>Ticker</th><th>Headline</th><th>Source</th><th>Sentiment</th><th class="num">Rel</th><th class="num">×</th></tr></thead>
+      <tbody>
+      {% for n in news %}
+        <tr data-ticker="{{ n.ticker or '' }}" data-label="{{ n.label or '' }}">
+          <td class="faint nowrap" style="font-size:11px">{{ n.published_at | hkt }}</td>
+          <td class="ticker">{{ n.ticker or '—' }}</td>
+          <td style="max-width:520px">
+            <a href="{{ n.url }}" target="_blank" rel="noopener noreferrer">{{ n.title }}</a>
+          </td>
+          <td class="dim" style="font-size:11px">{{ n.source[:18] }}</td>
+          <td>
+            {% if n.p_pos is not none %}
+            <div style="display:flex;align-items:center;gap:6px">
+              <span class="bar">
+                <i class="p" style="width:{{ (n.p_pos*100)|round(0) }}%"></i>
+                <i class="n" style="width:{{ (n.p_neg*100)|round(0) }}%"></i>
+                <i class="u" style="width:{{ (n.p_neu*100)|round(0) }}%"></i>
+              </span>
+              <span class="faint" style="font-size:10.5px">{{ n.label }}</span>
+            </div>
+            {% else %}<span class="faint" style="font-size:11px">pending</span>{% endif %}
+          </td>
+          <td class="num faint">{{ n.relevance | num(2) }}</td>
+          <td class="num faint">{{ n.cluster_size }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% if not news %}<div class="empty">No news in this run</div>{% endif %}
+  </div>
+</div>
+
+<div class="card mb" id="drawer" style="display:none">
+  <div class="card-head"><h2 id="drawer-title">Ticker</h2><div style="flex:1"></div>
+    <button class="btn sm ghost" id="drawer-close">Close ✕</button></div>
+  <div class="card-body">
+    <div class="split">
+      <div><div style="height:260px" id="candle-chart"></div></div>
+      <div>
+        <h3 style="margin-bottom:8px">Latest features</h3>
+        <div class="kv" id="drawer-features" style="max-height:260px;overflow:auto"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>Run events</h2></div>
+  <div class="card-body tight">
+    <div class="tbl-scroll" style="max-height:260px">
+    <table class="tbl-compact">
+      <tbody>
+      {% for e in events %}
+        <tr>
+          <td class="faint nowrap" style="font-size:11px">{{ e.ts | hkt }}</td>
+          <td><span class="pill">{{ e.stage }}</span></td>
+          <td style="width:1%"><span class="badge {{ 'bad' if e.level=='error' else ('warn' if e.level=='warn' else 'off') }}">{{ e.level }}</span></td>
+          <td>{{ e.message }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
+<script>
+(function () {
+  const { api, toast } = UI;
+  const sel = document.getElementById("run-select");
+  if (sel) sel.addEventListener("change", () => { window.location = "/pipeline?run_id=" + sel.value; });
+  const runBtn = document.getElementById("run-now");
+  if (runBtn) runBtn.addEventListener("click", async () => {
+    runBtn.disabled = true;
+    try { await api("/api/pipeline/run", { method: "POST", body: {} }); toast("Run started"); }
+    catch (e) { toast(e.message, "error"); }
+    setTimeout(() => runBtn.disabled = false, 4000);
+  });
+
+  function filterTable(inputId, tableId, labelId) {
+    const input = document.getElementById(inputId);
+    const labelSel = labelId ? document.getElementById(labelId) : null;
+    if (!input && !labelSel) return;
+    const apply = () => {
+      const q = (input?.value || "").toUpperCase();
+      const lab = labelSel?.value || "";
+      document.querySelectorAll("#" + tableId + " tbody tr").forEach(tr => {
+        const okT = !q || (tr.dataset.ticker || "").includes(q);
+        const okL = !lab || tr.dataset.label === lab;
+        tr.style.display = okT && okL ? "" : "none";
+      });
+    };
+    input?.addEventListener("input", apply);
+    labelSel?.addEventListener("change", apply);
+  }
+  filterTable("dec-filter", "dec-table");
+  filterTable("news-filter", "news-table", "news-label-filter");
+
+  let chart = null;
+  async function openDrawer(ticker) {
+    const drawer = document.getElementById("drawer");
+    drawer.style.display = "";
+    document.getElementById("drawer-title").textContent = ticker;
+    drawer.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    let data;
+    try { data = await api("/api/ticker/" + ticker); }
+    catch (e) { toast(e.message, "error"); return; }
+
+    const el = document.getElementById("candle-chart");
+    el.innerHTML = "";
+    chart = LightweightCharts.createChart(el, {
+      height: 260, layout: { background: { color: "transparent" }, textColor: "#8b97a4", fontSize: 11 },
+      grid: { vertLines: { color: "rgba(128,140,155,.10)" }, horzLines: { color: "rgba(128,140,155,.10)" } },
+      rightPriceScale: { borderVisible: false }, timeScale: { borderVisible: false, timeVisible: true },
+      crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    });
+    const series = chart.addCandlestickSeries({
+      upColor: "#d1242f", downColor: "#128a4b", borderVisible: false,
+      wickUpColor: "#d1242f", wickDownColor: "#128a4b",
+    });
+    series.setData(data.candles.map(c => ({
+      time: c.time, open: c.open, high: c.high, low: c.low, close: c.close
+    })));
+    chart.timeScale().fitContent();
+
+    const kv = document.getElementById("drawer-features");
+    kv.innerHTML = "";
+    const skip = new Set(["volume", "dollar_volume"]);
+    Object.entries(data.features).forEach(([k, v]) => {
+      if (skip.has(k)) return;
+      const dt = document.createElement("dt"); dt.textContent = k;
+      const dd = document.createElement("dd"); dd.textContent = (v === null ? "—" : v);
+      kv.appendChild(dt); kv.appendChild(dd);
+    });
+    if (data.prediction) {
+      const p = data.prediction;
+      const box = document.createElement("div");
+      box.style.gridColumn = "1 / -1";
+      box.innerHTML = `<div class="card" style="margin-top:10px"><div class="card-body" style="padding:10px">
+        <div class="faint" style="font-size:11px;margin-bottom:4px">MODEL ${p.model_id}</div>
+        <div class="kv">
+          <dt>p(win)</dt><dd>${p.p_win.toFixed(3)}</dd>
+          <dt>Expected R</dt><dd>${p.expected_r.toFixed(3)}</dd>
+          <dt>p(entry)</dt><dd>${p.p_entry.toFixed(3)}</dd>
+          <dt>ML score</dt><dd>${p.ml_score.toFixed(0)}</dd>
+        </div></div></div>`;
+      kv.parentElement.appendChild(box);
+    }
+  }
+
+  document.querySelectorAll(".ticker-link").forEach(a => {
+    a.addEventListener("click", (e) => { e.preventDefault(); openDrawer(a.dataset.ticker); });
+  });
+  document.getElementById("drawer-close")?.addEventListener("click", () => {
+    document.getElementById("drawer").style.display = "none";
+  });
+})();
+</script>
+{% endblock %}
