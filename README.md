@@ -1,11 +1,139 @@
 # Autotrade: Lightweight IBKR news-sentiment + ML trading bot
 
 A personal trading bot for US stocks: screens US stocks, ingests news and bars, scores text with
-FinBERT, predicts with a Tri-Lens ML stack, then trades through
-
-**IB Gateway** — all
-driven from a localhost web UI. PAPER by default; LIVE is double-locked.
+FinBERT, predicts with a Tri-Lens ML stack, then trades through **IB Gateway** — all driven from a
+localhost web UI. PAPER by default; LIVE is double-locked.
 It runs in **paper mode** by default: real market data, real orders, fake money.
+
+## Requirements
+
+| Requirement | Notes |
+|---|---|
+| Miniconda or Anaconda | Used only to create the interpreter; everything else is `pip` |
+| Python 3.11 | `pyproject.toml` requires `>=3.11`. 3.11 is what this project is tested on |
+| IB Gateway (or TWS) | Free download from IBKR. The **paper** build is enough to start |
+| ~2 GB free disk | CPU PyTorch (~250 MB) + FinBERT weights (~420 MB, fetched on first run) + bar cache |
+| Outbound network | yfinance, Google News RSS, Hugging Face (first run only) |
+| API keys (optional) | Finnhub and Marketaux free tiers, plus an SEC user agent. Without them the bot still runs on RSS + yfinance |
+
+Nothing else is compiled from source. `TA-Lib` and `shap` are optional — every indicator has a
+pure-pandas fallback and explanations are skipped if `shap` is absent.
+
+## Installation
+
+### 1. Create the conda environment
+
+```bash
+conda create -n autotrade python=3.11 -y
+conda activate autotrade
+python -V                       # must print Python 3.11.x
+```
+
+Run every command below with this env active. If you use PowerShell or cmd, activate the same
+way (`conda activate autotrade`) and swap `/` for `\` in paths.
+
+### 2. Install CPU-only PyTorch first
+
+The bot never uses a GPU, so install the small CPU build before anything can pull the
+~2.5 GB CUDA wheel:
+
+```bash
+pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.2"
+```
+
+On Windows `pip install torch` already resolves to a CPU wheel; on Linux and macOS this step
+is what keeps the install small.
+
+### 3. Install the bot itself
+
+```bash
+cd autotrade
+pip install -e ".[dev]"
+```
+
+The editable install (`-e`) matters: the code lives in `src/`, so without it
+`python -m tradebot.main` fails with `No module named tradebot`. `[dev]` adds pytest, ruff and
+the test helpers; drop it if you only want to run the bot.
+
+### 4. Create `.env`
+
+`.env` is git-ignored, so a fresh clone has none. Create it in the project root:
+
+```dotenv
+# ---------- IBKR ----------
+IB_HOST=127.0.0.1
+# 4002 = paper, 4001 = live
+IB_PORT=4002
+IB_CLIENT_ID=17
+# blank = auto-detect the logged-in account
+IB_ACCOUNT=
+# 3 = delayed data, 1 = live subscription
+IB_MARKET_DATA_TYPE=3
+# off | dry_run | paper | live
+TRADING_MODE=paper
+ALLOW_LIVE=0
+
+# ---------- News / data keys (all optional) ----------
+FINNHUB_API_KEY=
+MARKETAUX_API_KEY=
+SEC_USER_AGENT="autotrade/1.0 (you@example.com)"
+
+# ---------- App ----------
+APP_HOST=127.0.0.1
+APP_PORT=8000
+# set a value only if you expose the app beyond localhost
+APP_API_TOKEN=
+```
+
+An empty key simply disables that connector — the app starts either way, and
+`python scripts/check_env.py` prints which sources are live.
+
+### 5. Point IB Gateway at the app
+
+In IB Gateway: **Configure → Settings → API → Settings** and
+
+- enable **Enable ActiveX and Socket Clients**,
+- set **Socket port** to `4002` for paper (`4001` for live),
+- add `127.0.0.1` to **Trusted IPs**,
+- leave **Read-Only API** unchecked, or orders will be rejected.
+
+Then log in and restart Gateway. Two processes cannot share one `IB_CLIENT_ID`; a stale server
+still holding `17` makes the new one fail with **error 326**.
+
+### 6. Verify the install
+
+```bash
+pytest tests/unit -q            # offline; no broker needed
+python scripts/smoke_ib.py      # broker connection, positions, account values
+python scripts/check_env.py     # which API keys and news sources respond
+```
+
+`smoke_ib.py --orders` additionally places and cancels a live paper order.
+
+### 7. Install from the exact lock (optional)
+
+`requirements.lock.txt` is a full freeze of the environment this project runs in. Prefer
+`pip install -e ".[dev]"` for a new machine; the lock is for reproducing a known-good set:
+
+```bash
+pip install -r requirements.lock.txt
+```
+
+Two lines in that file are machine-specific and must be removed first: the trailing
+`-e c:\users\user\documents\autotrade` and the `packaging @ file:///home/conda/...` entry.
+Re-add the project with `pip install -e .` afterwards.
+
+### If the install fails
+
+| Symptom | Cause and fix |
+|---|---|
+| `No module named tradebot` | The editable install was skipped. Run `pip install -e .` from the project root |
+| pip starts downloading a ~2.5 GB `torch` | Step 2 was skipped, so PyPI's CUDA wheel won. Reinstall with the CPU index URL above |
+| `conda: command not found` (Windows) | Use **Anaconda Prompt** instead of `cmd`, or run `conda init bash` once |
+| `error 326 — client id 17 already in use` | An older `tradebot` process still holds the connection. Close it before restarting |
+| Connects, but every order is rejected | **Read-Only API** is still ticked in Gateway's API settings |
+| `TA-Lib` fails to build | Optional. Skip it; the pandas fallbacks produce the same indicators |
+| `error 10197 — competing live session` | Another TWS/Gateway/mobile session holds the market-data subscription. See *Known limitation* below |
 
 ## Quick start
 
@@ -14,14 +142,16 @@ conda activate autotrade
 python -m tradebot.main        # → http://127.0.0.1:8000
 ```
 
-First launch creates the database, downloads the language model, connects to IB Gateway
-and starts the 15-minute scheduler. Then open the dashboard and press **Run pipeline**.
+First launch creates the database, downloads the FinBERT weights into `models/hf_cache`
+(~420 MB, once), connects to IB Gateway and starts the 15-minute scheduler. Then open the
+dashboard and press **Run pipeline**.
 
 ```bash
 python scripts/train.py        # train a model (~60–90 s)
-python scripts/smoke_ib.py     # check the broker connection (--orders to test ordering)
-python scripts/check_env.py    # list which API keys are configured
 ```
+
+`smoke_ib.py` and `check_env.py` from step 6 are the quickest way to confirm a fresh machine
+is wired up correctly.
 
 ## What a trade looks like
 
